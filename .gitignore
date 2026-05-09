@@ -1,0 +1,16 @@
+.DS_Store
+/.build
+/Packages
+/*.xcodeproj
+xcuserdata/
+DerivedData/
+.swiftpm/
+Package.resolved
+*.swp
+*~
+output/
+test_input/
+test_inputs/
+test_outputs/
+*.txt
+*.pdf
