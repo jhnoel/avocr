@@ -125,5 +125,6 @@ final class MachineProgressReporter: ProgressReporter {
         }
         output.write(data: data)
         output.write(data: Data([0x0A]))
+        output.flush()
     }
 }

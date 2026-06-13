@@ -8,7 +8,8 @@ final class WorkerMessageTests: XCTestCase {
             path: "/test/doc.pdf",
             page: 2,
             text: "Hello",
-            blocks: []
+            blocks: [],
+            usedExistingText: true
         )
         let message = WorkerMessage.result(payload)
 
@@ -21,6 +22,7 @@ final class WorkerMessageTests: XCTestCase {
             XCTAssertEqual(decodedPayload.path, payload.path)
             XCTAssertEqual(decodedPayload.page, payload.page)
             XCTAssertEqual(decodedPayload.text, payload.text)
+            XCTAssertEqual(decodedPayload.usedExistingText, payload.usedExistingText)
         case .error:
             XCTFail("Expected result payload")
         }

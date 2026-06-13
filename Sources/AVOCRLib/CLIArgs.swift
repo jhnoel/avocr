@@ -96,7 +96,13 @@ public struct CLIArgs {
         if trimmed.isEmpty {
             return ["en-US"]
         }
-        return trimmed.split(separator: ",").map { String($0) }
+
+        let parsed = trimmed
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return parsed.isEmpty ? ["en-US"] : parsed
     }
 
     public var roi: CGRect? {
@@ -168,8 +174,8 @@ public struct CLIArgs {
             throw CLIError.invalidArgument("--stdout cannot be used with --output")
         }
 
-        if let minTextHeight = minTextHeight, minTextHeight <= 0 {
-            throw CLIError.invalidArgument("--min-text-height must be a positive number")
+        if let minTextHeight = minTextHeight, minTextHeight <= 0 || minTextHeight > 1 {
+            throw CLIError.invalidArgument("--min-text-height must be between 0 and 1")
         }
 
         if dpi < Constants.minPDFRenderDPI || dpi > Constants.maxPDFRenderDPI {
@@ -193,6 +199,18 @@ public struct CLIArgs {
 
         if embedTextLayer && stdout {
             throw CLIError.invalidArgument("--embed-text-layer cannot be used with --stdout")
+        }
+
+        if embedTextLayer && format == .jsonl {
+            throw CLIError.invalidArgument("--embed-text-layer cannot be used with --format jsonl")
+        }
+
+        if embedTextLayer && perPage {
+            throw CLIError.invalidArgument("--embed-text-layer cannot be used with --per-page")
+        }
+
+        if let maxErrors = maxErrors, maxErrors < 1 {
+            throw CLIError.invalidArgument("--max-errors must be >= 1")
         }
 
         if gracefulTimeout < 0 {
@@ -243,7 +261,7 @@ public struct CLIArgs {
         let y = parts[1]
         let w = parts[2]
         let h = parts[3]
-        guard x >= 0, y >= 0, w >= 0, h >= 0,
+        guard x >= 0, y >= 0, w > 0, h > 0,
               x <= 1, y <= 1, w <= 1, h <= 1,
               x + w <= 1, y + h <= 1 else {
             return nil

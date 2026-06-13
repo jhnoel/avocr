@@ -396,6 +396,38 @@ final class OutputWriterTests: XCTestCase {
         XCTAssertFalse(content.contains("\"old\""))
         XCTAssertEqual(content.split(separator: "\n").count, 1)
     }
+
+    func testSearchablePDFOutputAvoidsImplicitOverwriteInSameDirectory() throws {
+        let source = tempDir.appendingPathComponent("scan.pdf")
+        try Data("pdf".utf8).write(to: source)
+
+        let outputURL = try searchablePDFOutputURL(
+            for: source,
+            outputDir: tempDir.path,
+            overwrite: false,
+            fileSystem: RealFileSystem()
+        )
+
+        XCTAssertEqual(outputURL.lastPathComponent, "scan_ocr.pdf")
+        XCTAssertNotEqual(outputURL.path, source.path)
+    }
+
+    func testSearchablePDFOutputKeepsNameInDifferentOutputDirectory() throws {
+        let sourceDir = tempDir.appendingPathComponent("source")
+        let outputDir = tempDir.appendingPathComponent("output")
+        try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+        let source = sourceDir.appendingPathComponent("scan.pdf")
+        try Data("pdf".utf8).write(to: source)
+
+        let outputURL = try searchablePDFOutputURL(
+            for: source,
+            outputDir: outputDir.path,
+            overwrite: false,
+            fileSystem: RealFileSystem()
+        )
+
+        XCTAssertEqual(outputURL.path, outputDir.appendingPathComponent("scan.pdf").path)
+    }
     
     // MARK: - Concurrent Write Tests
     

@@ -29,6 +29,12 @@ public func runOCR(
         return .failure(.fileEnumerationFailed(String(describing: error)))
     }
 
+    if args.embedTextLayer, let nonPDF = files.first(where: { !FileEnumerator.isPDF($0) }) {
+        let message = "--embed-text-layer only supports PDF inputs: \(nonPDF.path)"
+        dependencies.logger.error(message)
+        return .failure(.processingFailed(path: nonPDF.path, message: message))
+    }
+
     if args.multiprocess {
         do {
             let result = try MultiprocessCoordinator.runMultiprocess(
@@ -47,6 +53,33 @@ public func runOCR(
     } else {
         return runSingleProcess(files: files, args: args, dependencies: dependencies)
     }
+}
+
+func searchablePDFOutputURL(
+    for sourceURL: URL,
+    outputDir: String?,
+    overwrite: Bool,
+    fileSystem: FileSystemProtocol
+) throws -> URL {
+    if overwrite {
+        return sourceURL
+    }
+
+    let destinationDirectory = URL(fileURLWithPath: outputDir ?? FileManager.default.currentDirectoryPath)
+    try fileSystem.createDirectory(
+        atPath: destinationDirectory.path,
+        withIntermediateDirectories: true,
+        attributes: nil
+    )
+
+    let proposedURL = destinationDirectory.appendingPathComponent(sourceURL.lastPathComponent)
+    if proposedURL.standardizedFileURL.path != sourceURL.standardizedFileURL.path {
+        return proposedURL
+    }
+
+    let stem = sourceURL.deletingPathExtension().lastPathComponent
+    let ext = sourceURL.pathExtension.isEmpty ? "pdf" : sourceURL.pathExtension
+    return destinationDirectory.appendingPathComponent("\(stem)_ocr.\(ext)")
 }
 
 func runSingleProcess(
@@ -275,20 +308,12 @@ func runSingleProcess(
         for (pdfPath, pageResults) in pdfPageResults {
             do {
                 let sourceURL = URL(fileURLWithPath: pdfPath)
-                let outputURL: URL
-                if args.overwrite {
-                    outputURL = sourceURL
-                } else if let outputDir = args.outputDir {
-                    let fileName = sourceURL.lastPathComponent
-                    try dependencies.fileSystem.createDirectory(
-                        atPath: outputDir,
-                        withIntermediateDirectories: true,
-                        attributes: nil
-                    )
-                    outputURL = URL(fileURLWithPath: outputDir).appendingPathComponent(fileName)
-                } else {
-                    outputURL = sourceURL
-                }
+                let outputURL = try searchablePDFOutputURL(
+                    for: sourceURL,
+                    outputDir: args.outputDir,
+                    overwrite: args.overwrite,
+                    fileSystem: dependencies.fileSystem
+                )
                 try PDFRenderer.createSearchablePDF(from: sourceURL, pageResults: pageResults, to: outputURL)
                 dependencies.logger.info("Wrote searchable PDF: \(outputURL.path)")
             } catch {
@@ -389,13 +414,13 @@ public func runWorker(args: CLIArgs) {
         case failed(WorkerTask, Error)
     }
 
-    // Bounded buffer: at most 2 pre-loaded items waiting for OCR.
+    // Bounded buffer: at most `prefetch` pre-loaded items waiting for OCR.
     // This caps memory usage (each loaded image can be 10-50 MB).
     let bufferLock = NSLock()
     var buffer: [PreparedWork] = []
     var bufferHead = 0
     let itemReady = DispatchSemaphore(value: 0)
-    let bufferSpace = DispatchSemaphore(value: 2)
+    let bufferSpace = DispatchSemaphore(value: max(1, args.prefetch))
     var producerDone = false
 
     // Producer thread: read tasks from stdin and pre-load images
@@ -461,7 +486,8 @@ public func runWorker(args: CLIArgs) {
             path: internalResult.path,
             page: internalResult.page,
             text: internalResult.text,
-            blocks: blocks
+            blocks: blocks,
+            usedExistingText: internalResult.usedExistingText
         )
         if let data = try? encoder.encode(WorkerMessage.result(payload)) {
             FileHandle.standardOutput.write(data)

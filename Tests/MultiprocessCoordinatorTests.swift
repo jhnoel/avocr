@@ -1,4 +1,7 @@
 import XCTest
+import CoreGraphics
+import PDFKit
+import AppKit
 @testable import AVOCRLib
 
 final class MultiprocessCoordinatorTests: XCTestCase {
@@ -102,6 +105,57 @@ final class MultiprocessCoordinatorTests: XCTestCase {
         XCTAssertEqual(result?.failed, 1)
     }
 
+    func testStdoutMultipagePDFResultsStayInPageOrderWhenWorkersFinishOutOfOrder() throws {
+        let pdfURL = try Self.createMultiPagePDF(pageCount: 2)
+        defer { try? FileManager.default.removeItem(at: pdfURL) }
+
+        let firstWorker = WorkerHarness()
+        let secondWorker = WorkerHarness()
+        let spawner = MockProcessSpawner()
+        var spawnCount = 0
+        spawner.spawnHandler = { _, _ in
+            defer { spawnCount += 1 }
+            return spawnCount == 0 ? firstWorker.spawnedProcess() : secondWorker.spawnedProcess()
+        }
+
+        firstWorker.respondToTasks { task in
+            Thread.sleep(forTimeInterval: 0.15)
+            return WorkerMessage.result(WorkerResultPayload(
+                id: task.id,
+                path: task.path,
+                page: task.page,
+                text: "first page",
+                blocks: []
+            ))
+        }
+        secondWorker.respondToTasks { task in
+            WorkerMessage.result(WorkerResultPayload(
+                id: task.id,
+                path: task.path,
+                page: task.page,
+                text: "second page",
+                blocks: []
+            ))
+        }
+
+        var args = makeMultiprocessArgs()
+        args.workers = JobsValue(argument: "2")
+        args.noHeaders = true
+        let output = InMemoryOutputStream()
+
+        let result = try MultiprocessCoordinator.runMultiprocess(
+            files: [pdfURL],
+            args: args,
+            dependencies: makeDependencies(output: output, processSpawner: spawner)
+        )
+
+        XCTAssertEqual(result.completed, 2)
+        let text = output.text
+        let firstRange = try XCTUnwrap(text.range(of: "first page"))
+        let secondRange = try XCTUnwrap(text.range(of: "second page"))
+        XCTAssertLessThan(firstRange.lowerBound, secondRange.lowerBound)
+    }
+
     private static func makeImageURLs(count: Int) -> [URL] {
         (0..<count).map { URL(fileURLWithPath: "/tmp/input-\($0).jpg") }
     }
@@ -123,17 +177,58 @@ final class MultiprocessCoordinatorTests: XCTestCase {
         return args
     }
 
-    private static func makeDependencies(processSpawner: ProcessSpawnerProtocol) -> RuntimeDependencies {
+    private static func makeDependencies(
+        output: OutputStreamProtocol = InMemoryOutputStream(),
+        processSpawner: ProcessSpawnerProtocol
+    ) -> RuntimeDependencies {
         RuntimeDependencies(
-            output: InMemoryOutputStream(),
+            output: output,
             errorOutput: InMemoryOutputStream(),
             processSpawner: processSpawner,
             logger: NullLogger()
         )
     }
 
-    private func makeDependencies(processSpawner: ProcessSpawnerProtocol) -> RuntimeDependencies {
-        Self.makeDependencies(processSpawner: processSpawner)
+    private func makeDependencies(
+        output: OutputStreamProtocol = InMemoryOutputStream(),
+        processSpawner: ProcessSpawnerProtocol
+    ) -> RuntimeDependencies {
+        Self.makeDependencies(output: output, processSpawner: processSpawner)
+    }
+
+    private static func createMultiPagePDF(pageCount: Int) throws -> URL {
+        let pdfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).pdf")
+        let image = makeTestImage(width: 100, height: 100)
+        let nsImage = NSImage(cgImage: image, size: NSSize(width: 100, height: 100))
+        let document = PDFDocument()
+        for pageIndex in 0..<pageCount {
+            if let page = PDFPage(image: nsImage) {
+                document.insert(page, at: pageIndex)
+            }
+        }
+        guard let data = document.dataRepresentation() else {
+            throw OCRError.ocrFailed("Unable to create PDF")
+        }
+        try data.write(to: pdfURL)
+        return pdfURL
+    }
+
+    private static func makeTestImage(width: Int, height: Int) -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        )!
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()!
     }
 }
 

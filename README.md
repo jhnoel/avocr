@@ -1,17 +1,15 @@
 # avocr
 
-A high-performance, macOS-native OCR command-line tool powered by Apple's Vision framework. Designed to scale across CPU cores with worker processes and handle large-scale batch OCR operations on images and PDFs.
+`avocr` is a fast, macOS-native OCR command-line tool powered by Apple's Vision framework. It handles images and PDFs, scales across worker processes, and can write plain text, JSON Lines, or searchable PDFs.
 
-## Features
+## Highlights
 
-- **Fast & Native**: Uses Apple's Vision framework (`VNRecognizeTextRequest`) for OCR
-- **Parallel Processing**: Multi-process OCR workers for scalable throughput
-- **Batch Processing**: Handle thousands of files with recursive directory scanning
-- **Multi-format Support**: Images (PNG, JPG, TIFF, HEIC, etc.) and multi-page PDFs
-- **Flexible Output**: Plain text, JSON Lines, or individual files per page
-- **Smart PDF Handling**: Skip OCR for PDFs with extractable text
-- **Column Detection**: Basic multi-column layout support
-- **Memory Efficient**: Streams PDF pages without loading entire documents into memory
+- **Native OCR** using `VNRecognizeTextRequest` — no model downloads or OCR server required.
+- **Fast batch processing** with multiple worker processes and bounded prefetching.
+- **PDF-aware behavior**: renders scanned pages, reuses embedded PDF text by default, or forces OCR when needed.
+- **Flexible outputs**: stdout, per-document text files, per-page text files, JSONL with bounding boxes, or searchable PDFs.
+- **Predictable ordering**: stdout and file output are emitted in input/page order even when workers finish out of order.
+- **Safe defaults**: output files are regenerated per run; searchable PDF mode avoids accidental same-path overwrites unless `--overwrite` is used.
 
 ## Requirements
 
@@ -19,20 +17,9 @@ A high-performance, macOS-native OCR command-line tool powered by Apple's Vision
 - Swift 5.9+
 - Apple Silicon or Intel Mac
 
-## Dependencies
-
-Runtime OCR and PDF handling use Apple system frameworks available on macOS:
-- Vision
-- PDFKit
-- CoreGraphics
-- ImageIO
-- AppKit
-
-The Swift package depends on [Swift Argument Parser](https://github.com/apple/swift-argument-parser) for command-line parsing. Swift Package Manager resolves it automatically during `swift build` or `swift test`; no separate OCR engine, model download, or external binary is required.
+Runtime OCR/PDF support comes from Apple system frameworks: Vision, PDFKit, CoreGraphics, ImageIO, and AppKit. Swift Package Manager resolves the only package dependency, [Swift Argument Parser](https://github.com/apple/swift-argument-parser).
 
 ## Installation
-
-### Build from source
 
 ```bash
 git clone https://github.com/fctrbl/avocr
@@ -40,74 +27,59 @@ cd avocr
 swift build -c release
 ```
 
-The binary will be available at `.build/release/avocr`.
+The binary is written to `.build/release/avocr`.
 
-### Install to PATH
+To install it on your `PATH`:
 
 ```bash
-swift build -c release
 sudo cp .build/release/avocr /usr/local/bin/avocr
 ```
 
-## Usage
+## Quick start
 
-### Basic Examples
-
-OCR a single image (writes `document.txt` to the current directory):
 ```bash
-avocr document.jpg
+# OCR a PDF or image; writes ./document.txt
+avocr document.pdf
+
+# Stream text to stdout instead of creating files
+avocr --stdout document.pdf > document.txt
+
+# Process a directory recursively
+avocr --output ./text ~/Documents/scans
+
+# Faster, lower-accuracy mode with 8 workers
+avocr --workers 8 --fast large-scan.pdf
+
+# JSON Lines with text blocks and bounding boxes
+avocr --stdout --format jsonl document.pdf > document.jsonl
 ```
 
-OCR a PDF with all pages (writes `report.txt` to the current directory):
-```bash
-avocr report.pdf
-```
+Progress and logs are written to stderr, so `--stdout` is safe to pipe or redirect.
 
-OCR all images in a directory:
-```bash
-avocr images/
-```
+## Input formats
 
-Use 8 concurrent workers with fast mode:
-```bash
-avocr --workers 8 --fast large-document.pdf
-```
+Supported file extensions are:
 
-### Output Options
+- PDFs: `.pdf`
+- Images: `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`, `.gif`, `.heic`, `.heif`, `.webp`
 
-Output to individual text files:
-```bash
-avocr --output ./output documents/
-```
+Directories are scanned recursively. Hidden files and hidden directories are skipped unless `--include-hidden` is set.
 
-Split PDF pages into separate files:
-```bash
-avocr --output ./output --per-page report.pdf
-```
+## Output behavior
 
-Output as JSON Lines with bounding boxes:
-```bash
-avocr --stdout --format jsonl document.pdf > results.jsonl
-```
+By default, `avocr` writes output files to the current directory. Use `--stdout` to stream results, or `--output <dir>` to choose a destination directory.
 
-Quiet mode (text only, no headers):
-```bash
-avocr --no-headers document.pdf
-```
+Text output paths:
 
-### Default Output Paths
-
-By default, `avocr` writes files to the current working directory. Use `--stdout` to stream results instead, or `--output <dir>` to choose a destination directory.
-
-File output uses these names:
-- Single image: `<basename>.txt`
+- Image: `<basename>.txt`
 - PDF combined text: `<basename>.txt`
-- PDF with `--per-page`: `<basename>_page<page>.txt`
-- File JSONL output: `results.jsonl`
+- PDF with `--per-page`: `<basename>_page<page>.txt` (0-based page numbers)
+- JSONL file output: `results.jsonl`
 
-Output files are regenerated on each run rather than appended to. If one batch contains multiple files with the same basename from different directories, `avocr` keeps the first simple filename and gives later collisions a path-derived filename so results are not merged or overwritten.
+Output files are truncated/regenerated on each run. If a batch contains multiple inputs with the same basename, later collisions get path-derived filenames instead of merging or overwriting earlier results.
 
 Examples:
+
 ```bash
 avocr ~/scans/invoice.pdf
 # writes ./invoice.txt
@@ -118,221 +90,256 @@ avocr --output ./text ~/scans/invoice.pdf
 avocr --output ./text --per-page ~/scans/invoice.pdf
 # writes ./text/invoice_page0.txt, ./text/invoice_page1.txt, ...
 
-avocr --output ./text --format jsonl ~/scans/
+avocr --output ./text --format jsonl ~/scans
 # writes ./text/results.jsonl
 ```
 
+### Plain text
 
-### Advanced Options
+```text
+=== Page 0 ===
+Text from the first page.
 
-**Language Support**
+=== Page 1 ===
+Text from the second page.
+```
+
+Use `--no-headers` for raw text only.
+
+### JSON Lines
+
+Each line is one page/image result:
+
+```json
+{"path":"doc.pdf","page":0,"text":"Extracted text...","blocks":[{"text":"Line 1","confidence":0.95,"bbox":{"x":0.1,"y":0.8,"width":0.8,"height":0.05}}]}
+```
+
+Fields:
+
+- `path`: source file path
+- `page`: 0-based page number; omitted for images
+- `text`: full extracted text for that page/image
+- `blocks`: OCR text blocks with confidence and normalized bounding boxes
+
+## PDF behavior
+
+### Embedded text vs OCR
+
+For PDFs, `avocr` uses embedded text when a page already has enough extractable text. This is much faster and avoids OCR noise on born-digital PDFs.
+
 ```bash
-# Multiple languages
-avocr --lang en-US,fr-FR,de-DE document.pdf
+# Default: use embedded text when available, OCR scanned pages
+avocr document.pdf
+
+# Force OCR even if the PDF has an existing text layer
+avocr --force-ocr document.pdf
+```
+
+### Searchable PDFs
+
+`--embed-text-layer` creates PDFs that preserve the original page image and add invisible OCR text so the result is searchable/selectable.
+
+```bash
+# Write ./scan_ocr.pdf if scan.pdf is in the current directory
+avocr --embed-text-layer scan.pdf
+
+# Write ./searchable/scan.pdf
+avocr --embed-text-layer --output ./searchable scan.pdf
+
+# Replace the original file intentionally
+avocr --embed-text-layer --overwrite scan.pdf
+```
+
+Notes:
+
+- Searchable PDF mode only accepts PDF inputs.
+- It cannot be combined with `--stdout`, `--format jsonl`, or `--per-page`.
+- Without `--overwrite`, `avocr` will not write to the same source path; it appends `_ocr` when the destination would otherwise equal the input file.
+
+## OCR options
+
+```bash
+# Multiple languages; whitespace is OK
+avocr --lang "en-US, fr-FR, de-DE" document.pdf
 
 # Disable language correction
-avocr --no-correction handwritten.jpg
+avocr --no-correction handwritten-or-code.png
+
+# Region of interest: x,y,w,h in normalized 0-1 coordinates
+avocr --roi 0.5,0.5,0.5,0.5 document.pdf
+
+# Ignore very small text blocks
+avocr --min-text-height 0.02 document.pdf
 ```
 
-**PDF Optimization**
-```bash
-# Lower DPI for faster processing (trades quality for speed)
-avocr --dpi 200 large.pdf
+### Columns
 
-# Prefer embedded text when available (default)
-avocr mixed-content.pdf
-
-# Force OCR even when PDF has embedded text
-avocr --force-ocr mixed-content.pdf
-
-# High DPI for better accuracy on low-quality scans
-avocr --dpi 400 poor-quality-scan.pdf
-
-# Retry transient OCR errors (e.g. GPU busy)
-avocr --retries 2 large.pdf
-```
-
-**Column Detection**
 ```bash
 # Auto-detect columns (default)
 avocr --columns auto newspaper.pdf
 
-# Force single column
+# Force a fixed layout
 avocr --columns 1 document.pdf
-
-# Force 2-column layout
 avocr --columns 2 newspaper.pdf
+avocr --columns 3 tri-fold.pdf
 ```
 
-**Progress Tracking**
-```bash
-avocr documents/
-```
+Column detection is heuristic-based; use fixed columns when you know the layout.
 
-**Region of Interest**
-```bash
-# OCR only top-right quadrant (normalized 0-1 coordinates)
-avocr --roi 0.5,0.5,0.5,0.5 document.pdf
-```
+## Performance tuning
 
-### Batch Processing Examples
-
-Process entire directory tree:
-```bash
-avocr --workers 12 --output ./ocr-output ~/Documents/scans/
-```
-
-Include hidden files:
-```bash
-avocr --include-hidden ~/Documents/
-```
-
-High-quality OCR with maximum accuracy:
-```bash
-avocr --dpi 400 --lang en-US --columns auto important-document.pdf
-```
-
-## Command-Line Options
-
-```
--h, --help                 Show help message
---workers <N>              Number of worker processes (default: CPU count; use 'max')
---fast                     Use fast recognition level (less accurate, faster)
---lang <langs>             Comma-separated language codes (default: en-US)
---no-correction            Disable language correction
---min-text-height <f>      Minimum text height in normalized coordinates (0-1)
---roi <x,y,w,h>            Region of interest in normalized coordinates (0-1)
---dpi <N>                  PDF render DPI (default: 300, range: 72-600)
---force-ocr                Force OCR even when PDF has embedded text
---use-existing-text        Use embedded PDF text when available (default)
---embed-text-layer         Output searchable PDFs with an OCR text layer
---output <dir>             Write output files to directory (default: current directory)
---stdout                   Write output to stdout
---per-page                 Write one .txt file per page
---format <text|jsonl>      Output format (default: text)
---no-headers               Suppress headers, output only raw text
---no-progress              Disable progress output
---columns <auto|1|2|3>     Column detection mode (default: auto)
---include-hidden           Include hidden files when scanning directories
---retries <N>               Retries for transient OCR errors (default: 0)
-```
-
-## Performance Tuning
-
-### Concurrency (`--workers`)
-
-- **Default**: CPU core count
-- **Apple Silicon M1/M2**: Try `--workers 8` to `--workers 12` for optimal throughput
-- **Apple Silicon M3/M4**: Try `--workers 12` to `--workers 16`
-- **Intel Macs**: Start with `--workers 4` to `--workers 8`
-
-Higher concurrency increases throughput but also memory usage. Monitor Activity Monitor if processing very large files.
-
-### Recognition Level
-
-- **`--fast`**: ~2-3x faster, good for clean printed text
-- **Default (accurate)**: Best quality, use for complex layouts or poor scans
-
-### DPI Settings
-
-- **200 DPI**: Fast, good for clean documents
-- **300 DPI** (default): Balanced quality and speed
-- **400 DPI**: Best for low-quality scans or small text
-
-Higher DPI increases memory usage and processing time significantly.
-
-### Benchmark Example
+### Workers
 
 ```bash
-$ avocr --workers 12 --fast test-pdfs/
-Found 50 file(s) to process
-Using 12 concurrent workers
-
-Completed: 500 pages
-Errors: 0
-Duration: 45.2s
-Throughput: 11.06 pages/sec
+avocr --workers 8 scans/
+avocr --workers max scans/
 ```
 
-## Output Formats
+Default worker count is the active CPU count. More workers can improve throughput but also increase memory use. For very large PDFs or high DPI, reduce `--workers` first if you see memory pressure.
 
-### Plain Text (Default)
+Starting points:
 
-```
-=== Page 0 ===
-This is the OCR text from page 1.
+- Apple Silicon M1/M2: `--workers 8` to `--workers 12`
+- Apple Silicon M3/M4: `--workers 12` to `--workers 16`
+- Intel Macs: `--workers 4` to `--workers 8`
 
-=== Page 1 ===
-This is the OCR text from page 2.
-```
+### DPI
 
-### JSON Lines (`--format jsonl`)
-
-Each line is a JSON object:
-```json
-{"path":"doc.pdf","page":0,"text":"Extracted text...","blocks":[{"text":"Line 1","confidence":0.95,"bbox":{"x":0.1,"y":0.8,"width":0.8,"height":0.05}}]}
-{"path":"doc.pdf","page":1,"text":"More text...","blocks":[...]}
+```bash
+avocr --dpi 200 clean-scan.pdf   # faster
+avocr --dpi 300 document.pdf     # default balance
+avocr --dpi 400 tiny-text.pdf    # slower, often more accurate
 ```
 
-Fields:
-- `path`: Source file path
-- `page`: Page number (null for images)
-- `text`: Full extracted text
-- `blocks`: Array of text blocks with confidence and bounding boxes
+Allowed range is 72–600 DPI. Higher DPI can significantly increase memory and processing time.
 
-## Self-Test
+### Fast mode
 
+```bash
+avocr --fast clean-printed-text.pdf
+```
 
-## Known Limitations
+`--fast` is usually best for clean printed text. Leave it off for small text, noisy scans, or complex layouts.
 
-- **Handwriting**: Vision's handwriting recognition is limited; works best on printed text
-- **Complex Layouts**: Auto column detection is heuristic-based and may not handle very complex multi-column layouts perfectly
-- **Rotated Text**: Vision handles minor skew but not fully rotated text
-- **Tables**: No special table extraction; text is read in visual order
-- **Languages**: Limited to languages supported by Vision framework (see Apple documentation)
+### Prefetch
 
-## Architecture
+```bash
+avocr --prefetch 1 huge.pdf
+avocr --prefetch 4 many-small-images/
+```
 
-- **CLIArgs**: Command-line argument parsing
-- **FileEnumerator**: Recursive directory traversal and file filtering
-- **AVOCREngine**: Core OCR using VNRecognizeTextRequest
-- **PDFRenderer**: PDF page to CGImage rendering via PDFKit
-- **ReadingOrder**: Text block sorting with column detection
-- **OutputWriter**: Multi-format output (stdout, files, JSONL)
-- **MultiprocessCoordinator**: Worker process orchestration and result ordering
+`--prefetch` controls in-flight tasks per worker. Lower values reduce memory use; higher values can help when image/PDF loading is the bottleneck.
 
-## Performance Characteristics
+## Progress, logs, and automation
 
-- **Memory**: ~100-200 MB baseline + ~10-50 MB per concurrent page (depends on DPI)
-- **CPU**: Scales with `--workers` up to CPU core count
-- **Throughput**: On Apple Silicon M1, expect 5-15 pages/sec depending on complexity and settings
+```bash
+# Quiet output except OCR text/files
+avocr --no-progress document.pdf
+
+# Machine-readable progress on stderr
+avocr --progress-format json --stdout document.pdf > document.txt
+
+# JSON-formatted logs on stderr
+avocr --log-format json --verbose document.pdf
+```
+
+`--progress-format quiet` is equivalent to disabling progress. `--fail-fast`, `--max-errors <N>`, and `--retries <N>` are useful for batch jobs.
+
+## Command-line options
+
+```text
+-h, --help                         Show help information
+--version                          Show version
+-i, --input <path>                 Input file/directory; can be repeated
+--include-hidden                   Include hidden files during directory scans
+-o, --output <dir>                 Output directory (default: current directory)
+--stdout                           Write OCR results to stdout
+-f, --format <text|jsonl>          Output format (default: text)
+--per-page                         Write one text file per PDF page
+--no-headers                       Suppress text page headers
+--no-progress                      Disable progress output
+--progress-format <bar|json|quiet> Progress output format (stderr)
+-v, --verbose                      Enable debug logging
+--log-format <text|json>           Log format (stderr)
+--fast                             Use fast recognition level
+-c, --columns <auto|1|2|3>         Column layout mode
+-l, --lang <codes>                 Comma-separated language codes
+--no-correction                    Disable Vision language correction
+--min-text-height <0-1>            Minimum normalized text height
+--roi <x,y,w,h>                    Normalized region of interest
+--dpi <72-600>                     PDF render DPI (default: 300)
+--use-existing-text                Explicitly request default embedded-text behavior
+--force-ocr                        OCR PDFs even when embedded text exists
+--embed-text-layer                 Create searchable PDFs
+--overwrite                        Replace originals in searchable PDF mode
+-j, --workers <N|max>              Worker processes
+--prefetch <N>                     In-flight tasks per worker
+--fail-fast                        Stop after first processing error
+--max-errors <N>                   Stop after N processing errors
+--retries <N>                      Retry transient Vision errors
+--graceful-timeout <seconds>       Cleanup time after cancellation
+```
 
 ## Troubleshooting
 
-**Out of memory errors:**
-- Reduce `--workers` concurrency
-- Lower `--dpi` setting
-- Process files in smaller batches
+**The command prints help instead of running**
 
-**Poor accuracy:**
+Pass at least one input path, or use `-i/--input`:
+
+```bash
+avocr -i ./scans -i ./photos -o ./text
+```
+
+**Out of memory or the Mac becomes sluggish**
+
+- Reduce `--workers`
+- Reduce `--prefetch`
+- Lower `--dpi`
+- Process a smaller batch
+
+**Poor OCR accuracy**
+
+- Remove `--fast`
 - Increase `--dpi` to 400
-- Remove `--fast` flag
-- Verify correct `--lang` setting
-- Check if input quality is sufficient
+- Set the correct `--lang`
+- Try `--columns 1`, `--columns 2`, or `--columns 3` for known layouts
+- Check scan quality and page rotation
 
-**Slow performance:**
-- Increase `--workers` to match CPU cores
-- Add `--fast` flag
-- Reduce `--dpi` to 200
-- Default behavior uses embedded PDF text when available
+**Born-digital PDFs return text too quickly / do not look OCR'd**
 
-## Contributing
+That is the default embedded-text shortcut. Use `--force-ocr` when you need OCR output specifically.
 
-Contributions welcome! Areas for improvement:
-- Better column detection algorithms
-- Table extraction support
-- Watch mode (`--watch`) for directory monitoring
-- Additional output formats
+**I need deterministic output for a pipeline**
+
+Use `--stdout --no-progress` or redirect stderr separately. Page results are emitted in input/page order even with multiple workers.
+
+## Development
+
+```bash
+swift test
+swift run avocr --help
+swift build -c release
+```
+
+The repository also includes a Python benchmark harness in `benchmark/` for comparing `avocr` with other OCR engines.
+
+## Architecture
+
+- `FileEnumerator`: recursive input discovery and filtering
+- `WorkItems`: PDF/image work-plan construction
+- `AVOCREngine`: Vision OCR wrapper
+- `PDFRenderer`: PDF rendering, embedded text extraction, searchable PDF creation
+- `ReadingOrder`: text block sorting and column heuristics
+- `OutputWriter`: text/JSONL/stdout/file output
+- `MultiprocessCoordinator`: worker orchestration, cancellation, ordered output
+
+## Known limitations
+
+- Handwriting recognition depends on Apple's Vision capabilities and works best for clear printed text.
+- Column detection is heuristic and may need manual `--columns` for complex layouts.
+- Tables are emitted as text blocks, not structured table data.
+- Fully rotated pages/text may require preprocessing.
+- Available OCR languages are limited to the languages supported by the installed macOS Vision framework.
 
 ## License
 
@@ -340,4 +347,4 @@ This is free and unencumbered software released into the public domain. See [LIC
 
 ## Credits
 
-Built using Apple's Vision framework, PDFKit, and Swift Argument Parser.
+Built with Apple's Vision framework, PDFKit, and Swift Argument Parser.

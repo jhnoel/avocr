@@ -20,8 +20,8 @@ public final class StandardOutputStream: OutputStreamProtocol {
     }
 
     public func write(_ string: String) {
-        _ = string.withCString { buffer in
-            fputs(buffer, filePointer)
+        if let encoded = string.data(using: .utf8) {
+            fileHandle.write(encoded)
         }
     }
 
@@ -47,8 +47,8 @@ public final class StandardErrorStream: OutputStreamProtocol {
     }
 
     public func write(_ string: String) {
-        _ = string.withCString { buffer in
-            fputs(buffer, filePointer)
+        if let encoded = string.data(using: .utf8) {
+            fileHandle.write(encoded)
         }
     }
 

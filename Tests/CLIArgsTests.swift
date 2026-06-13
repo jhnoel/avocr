@@ -140,6 +140,12 @@ final class CLIArgsTests: XCTestCase {
         XCTAssertTrue(languages.contains("en-US"))
         XCTAssertTrue(languages.contains("fr-FR"))
     }
+
+    func testLanguagesTrimWhitespaceAndIgnoreEmptyComponents() throws {
+        var args = makeArgs()
+        args.languageString = " en-US, fr-FR, ,de-DE "
+        XCTAssertEqual(args.languages, ["en-US", "fr-FR", "de-DE"])
+    }
     
     func testOutputOption() throws {
         var args = makeArgs()
@@ -298,6 +304,14 @@ final class CLIArgsTests: XCTestCase {
         XCTAssertThrowsError(try args.validate())
     }
 
+    func testInvalidMinTextHeightThrows() {
+        var args = makeArgs()
+        args.minTextHeight = 0
+        XCTAssertThrowsError(try args.validate())
+        args.minTextHeight = 1.1
+        XCTAssertThrowsError(try args.validate())
+    }
+
     func testInvalidWorkersThrows() {
         XCTAssertNil(JobsValue(argument: "0"))
         XCTAssertNil(JobsValue(argument: "-1"))
@@ -316,12 +330,42 @@ final class CLIArgsTests: XCTestCase {
         XCTAssertThrowsError(try args.validate())
     }
 
+    func testInvalidRetriesAndMaxErrorsThrow() {
+        var args = makeArgs()
+        args.retries = -1
+        XCTAssertThrowsError(try args.validate())
+
+        args = makeArgs()
+        args.maxErrors = 0
+        XCTAssertThrowsError(try args.validate())
+    }
+
+    func testEmbedTextLayerRejectsIncompatibleOutputModes() {
+        var args = makeArgs()
+        args.embedTextLayer = true
+        args.stdout = true
+        XCTAssertThrowsError(try args.validate())
+
+        args = makeArgs()
+        args.embedTextLayer = true
+        args.format = .jsonl
+        XCTAssertThrowsError(try args.validate())
+
+        args = makeArgs()
+        args.embedTextLayer = true
+        args.perPage = true
+        XCTAssertThrowsError(try args.validate())
+    }
+
     func testROIMustFitWithinUnitRectangle() {
         var args = makeArgs()
         args.roiString = "0.8,0.1,0.3,0.2"
         XCTAssertThrowsError(try args.validate())
 
         args.roiString = "0.1,0.8,0.2,0.3"
+        XCTAssertThrowsError(try args.validate())
+
+        args.roiString = "0.1,0.1,0,0.2"
         XCTAssertThrowsError(try args.validate())
     }
 }

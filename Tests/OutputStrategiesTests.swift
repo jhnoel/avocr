@@ -42,6 +42,30 @@ final class OutputStrategiesTests: XCTestCase {
         XCTAssertEqual(json?["page"] as? Int, 2)
     }
 
+    func testStandardOutputStreamPreservesOrderWhenMixingStringAndDataWrites() throws {
+        let outputFile = tempDir.appendingPathComponent("stream.txt")
+        FileManager.default.createFile(atPath: outputFile.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: outputFile)
+        guard let filePointer = fopen(outputFile.path, "w") else {
+            XCTFail("Unable to open temporary output file")
+            return
+        }
+        defer {
+            fflush(filePointer)
+            fclose(filePointer)
+            try? handle.close()
+        }
+
+        let stream = StandardOutputStream(fileHandle: handle, filePointer: filePointer)
+        stream.write("a")
+        stream.write(data: Data("b".utf8))
+        stream.write("c")
+        stream.flush()
+
+        let content = try String(contentsOf: outputFile, encoding: .utf8)
+        XCTAssertEqual(content, "abc")
+    }
+
     func testFileTextStrategyWritesFile() throws {
         let strategy = FileTextStrategy(outputDir: tempDir.path, perPage: false, fileSystem: RealFileSystem())
         let result = OCRResult(text: "File text", blocks: [], path: "/test/doc.pdf", page: 0)

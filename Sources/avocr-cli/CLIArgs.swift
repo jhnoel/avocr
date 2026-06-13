@@ -8,16 +8,16 @@ import AVOCRLib
 @main
 struct OCRCommand: ParsableCommand {
     static var configuration = CommandConfiguration(
-        commandName: "ocr",
+        commandName: "avocr",
         abstract: "Fast macOS OCR using Apple Vision",
         discussion: """
             Supported formats: PDF, PNG, JPEG, TIFF, GIF, BMP, HEIC, WebP
 
             EXAMPLES:
-              ocr document.pdf
-              ocr --stdout image.png | pbcopy
-              ocr -f jsonl -o ./results/ *.pdf
-              ocr -i ./scans -i ./photos -o ./text
+              avocr document.pdf
+              avocr --stdout image.png | pbcopy
+              avocr -f jsonl -o ./results/ *.pdf
+              avocr -i ./scans -i ./photos -o ./text
             """,
         version: "1.0.0"
     )
@@ -53,6 +53,9 @@ struct OCRCommand: ParsableCommand {
     @Flag(name: .customLong("no-progress"), help: "Disable progress output")
     var noProgress: Bool = false
 
+    @Option(name: .customLong("progress-format"), help: "Progress format: bar, json, or quiet")
+    var progressFormat: AVOCRLib.ProgressFormat = .bar
+
     @Flag(name: [.short, .customLong("verbose")], help: "Enable verbose logging")
     var verbose: Bool = false
 
@@ -84,8 +87,8 @@ struct OCRCommand: ParsableCommand {
     @Option(name: .customLong("dpi"), help: "PDF render DPI (72-600)")
     var dpi: Int = 300
 
-    @Flag(name: .customLong("use-existing-text"), help: "Use existing PDF text instead of OCR (default)")
-    var useExistingText: Bool = true
+    @Flag(name: .customLong("use-existing-text"), help: "Use embedded PDF text when available (default; explicit for scripts)")
+    var useExistingText: Bool = false
 
     @Flag(name: .customLong("embed-text-layer"), help: "Output a searchable PDF with OCR text layer embedded")
     var embedTextLayer: Bool = false
@@ -101,7 +104,7 @@ struct OCRCommand: ParsableCommand {
     @Option(name: [.customShort("j"), .customLong("workers")], help: "Worker processes (default: CPU count, or 'max')")
     var workers: AVOCRLib.JobsValue?
 
-    @Option(name: .customLong("prefetch"), help: "In-flight tasks per worker (default: 2)")
+    @Option(name: .customLong("prefetch"), help: "In-flight tasks per worker")
     var prefetch: Int = 2
 
     // MARK: - Error Handling Options
@@ -112,10 +115,10 @@ struct OCRCommand: ParsableCommand {
     @Option(name: .customLong("max-errors"), help: "Maximum errors before stopping (default: unlimited)")
     var maxErrors: Int?
 
-    @Option(name: .customLong("retries"), help: "Retries for transient OCR errors (default: 0)")
+    @Option(name: .customLong("retries"), help: "Retries for transient OCR errors")
     var retries: Int = 0
 
-    @Option(name: .customLong("graceful-timeout"), help: "Seconds to allow cleanup after cancellation (default: 2.0)")
+    @Option(name: .customLong("graceful-timeout"), help: "Seconds to allow cleanup after cancellation")
     var gracefulTimeout: Double = 2.0
 
     // MARK: - Hidden/Deprecated Options
@@ -143,8 +146,8 @@ struct OCRCommand: ParsableCommand {
             throw ValidationError("--stdout cannot be used with --output")
         }
 
-        if let minTextHeight = minTextHeight, minTextHeight <= 0 {
-            throw ValidationError("--min-text-height must be a positive number")
+        if let minTextHeight = minTextHeight, minTextHeight <= 0 || minTextHeight > 1 {
+            throw ValidationError("--min-text-height must be between 0 and 1")
         }
 
         if dpi < 72 || dpi > 600 {
@@ -155,6 +158,10 @@ struct OCRCommand: ParsableCommand {
             throw ValidationError("--overwrite requires --embed-text-layer")
         }
 
+        if forceOCR && useExistingText {
+            throw ValidationError("--force-ocr cannot be used with --use-existing-text")
+        }
+
         if embedTextLayer && stdout {
             throw ValidationError("--embed-text-layer cannot be used with --stdout")
         }
@@ -163,10 +170,32 @@ struct OCRCommand: ParsableCommand {
             throw ValidationError("--embed-text-layer cannot be used with --format jsonl")
         }
 
+        if embedTextLayer && perPage {
+            throw ValidationError("--embed-text-layer cannot be used with --per-page")
+        }
+
+        if let maxErrors = maxErrors, maxErrors < 1 {
+            throw ValidationError("--max-errors must be >= 1")
+        }
+
+        if prefetch < 1 {
+            throw ValidationError("--prefetch must be >= 1")
+        }
+
+        if retries < 0 {
+            throw ValidationError("--retries must be >= 0")
+        }
+
+        if gracefulTimeout < 0 {
+            throw ValidationError("--graceful-timeout must be >= 0")
+        }
+
         if let roiString = roiString {
             let parts = roiString.split(separator: ",").compactMap { Double($0) }
             guard parts.count == 4,
-                  parts.allSatisfy({ $0 >= 0 && $0 <= 1 }),
+                  parts[0] >= 0, parts[1] >= 0,
+                  parts[2] > 0, parts[3] > 0,
+                  parts.allSatisfy({ $0 <= 1 }),
                   parts[0] + parts[2] <= 1,
                   parts[1] + parts[3] <= 1 else {
                 throw ValidationError("--roi must be x,y,w,h with 0-1 normalized values")
@@ -181,11 +210,13 @@ struct OCRCommand: ParsableCommand {
         // Map all options to the library struct
         libArgs.inputs = inputs + inputOptions
         libArgs.includeHidden = includeHidden
+        libArgs.stdout = stdout
         libArgs.output = stdout ? nil : (output ?? FileManager.default.currentDirectoryPath)
         libArgs.format = jsonl ? .jsonl : format
         libArgs.perPage = splitPages || perPage
         libArgs.noHeaders = quiet || noHeaders
         libArgs.noProgress = noProgress
+        libArgs.progressFormat = progressFormat
         libArgs.verbose = verbose
         libArgs.logFormat = logFormat
         libArgs.fast = fast
@@ -195,7 +226,7 @@ struct OCRCommand: ParsableCommand {
         libArgs.minTextHeight = minTextHeight
         libArgs.roiString = roiString
         libArgs.dpi = dpi
-        libArgs.useExistingText = forceOCR ? false : useExistingText
+        libArgs.useExistingText = forceOCR ? false : true
         libArgs.embedTextLayer = embedTextLayer
         libArgs.overwrite = overwrite
         libArgs.workers = workers

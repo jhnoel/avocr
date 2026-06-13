@@ -25,6 +25,23 @@ struct WorkerResultPayload: Codable {
     let page: Int?
     let text: String
     let blocks: [WorkerTextBlock]
+    let usedExistingText: Bool
+
+    init(
+        id: Int,
+        path: String,
+        page: Int?,
+        text: String,
+        blocks: [WorkerTextBlock],
+        usedExistingText: Bool = false
+    ) {
+        self.id = id
+        self.path = path
+        self.page = page
+        self.text = text
+        self.blocks = blocks
+        self.usedExistingText = usedExistingText
+    }
 }
 
 struct WorkerErrorPayload: Codable {
@@ -45,6 +62,7 @@ enum WorkerMessage: Codable {
         case page
         case text
         case blocks
+        case usedExistingText
         case message
     }
 
@@ -59,7 +77,8 @@ enum WorkerMessage: Codable {
                 path: try container.decode(String.self, forKey: .path),
                 page: try container.decodeIfPresent(Int.self, forKey: .page),
                 text: try container.decode(String.self, forKey: .text),
-                blocks: try container.decode([WorkerTextBlock].self, forKey: .blocks)
+                blocks: try container.decode([WorkerTextBlock].self, forKey: .blocks),
+                usedExistingText: try container.decodeIfPresent(Bool.self, forKey: .usedExistingText) ?? false
             )
             self = .result(payload)
         case "error":
@@ -89,6 +108,7 @@ enum WorkerMessage: Codable {
             try container.encodeIfPresent(payload.page, forKey: .page)
             try container.encode(payload.text, forKey: .text)
             try container.encode(payload.blocks, forKey: .blocks)
+            try container.encode(payload.usedExistingText, forKey: .usedExistingText)
         case .error(let payload):
             try container.encode("error", forKey: .type)
             try container.encode(payload.id, forKey: .id)

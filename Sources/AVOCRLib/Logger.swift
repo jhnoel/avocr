@@ -135,6 +135,7 @@ public final class JSONLogger: Logger {
         guard let data = try? encoder.encode(record) else { return }
         output.write(data: data)
         output.write(data: Data([0x0A]))
+        output.flush()
     }
 }
 

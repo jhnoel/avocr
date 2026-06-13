@@ -86,7 +86,7 @@ struct MultiprocessCoordinator {
             format: args.format,
             noHeaders: args.noHeaders,
             emitPageMarkers: false,
-            orderedWrites: true,
+            orderedWrites: false,
             output: dependencies.output,
             fileSystem: dependencies.fileSystem
         )
@@ -99,6 +99,7 @@ struct MultiprocessCoordinator {
         var nextTaskIndex = 0
         var completedPages = 0
         var errors = 0
+        var skippedPages = 0
         let startTime = Date()
 
         // Accumulate OCR blocks per PDF when embedding text layers
@@ -121,6 +122,38 @@ struct MultiprocessCoordinator {
         let signalQueue = DispatchQueue(label: "avocr.multiprocess.signal")
         var signalSources: [DispatchSourceSignal] = []
         var pendingCompletions = items.count
+        var nextWritableTaskID = 0
+        var pendingOutputResults: [Int: OCRResult] = [:]
+        var completedTasksWithoutOutput = Set<Int>()
+
+        func flushOrderedOutput() {
+            while true {
+                if let result = pendingOutputResults.removeValue(forKey: nextWritableTaskID) {
+                    outputQueue.async {
+                        do {
+                            try writer.write(result: result)
+                        } catch {
+                            dependencies.logger.error("\(error)")
+                        }
+                    }
+                    nextWritableTaskID += 1
+                } else if completedTasksWithoutOutput.remove(nextWritableTaskID) != nil {
+                    nextWritableTaskID += 1
+                } else {
+                    break
+                }
+            }
+        }
+
+        func enqueueOutput(taskID: Int, result: OCRResult) {
+            pendingOutputResults[taskID] = result
+            flushOrderedOutput()
+        }
+
+        func markTaskWithoutOutput(_ taskID: Int) {
+            completedTasksWithoutOutput.insert(taskID)
+            flushOrderedOutput()
+        }
 
         func terminateWorkers(force: Bool) {
             if force {
@@ -230,6 +263,21 @@ struct MultiprocessCoordinator {
             }
         }
 
+        func failUnassignedWork(reason: String) {
+            let unassignedItems = Array(items[nextTaskIndex..<items.count])
+            guard !unassignedItems.isEmpty else { return }
+            nextTaskIndex = items.count
+
+            for item in unassignedItems where pendingCompletions > 0 {
+                errors += 1
+                dependencies.logger.error("\(reason) before processing task \(item.id)")
+                markTaskWithoutOutput(item.id)
+                noteCompletion(path: item.path)
+                pendingCompletions -= 1
+                completionGroup.leave()
+            }
+        }
+
         func handleMessage(_ message: WorkerMessage, from worker: WorkerState) {
             if worker.inflight > 0 {
                 worker.inflight -= 1
@@ -256,10 +304,15 @@ struct MultiprocessCoordinator {
                     blocks = []
                 }
 
+                if resultMessage.usedExistingText {
+                    skippedPages += 1
+                }
+
                 if args.embedTextLayer, let pageIndex = resultMessage.page {
                     var entries = pdfPageResults[resultMessage.path] ?? []
                     entries.append((pageIndex: pageIndex, blocks: blocks))
                     pdfPageResults[resultMessage.path] = entries
+                    markTaskWithoutOutput(resultMessage.id)
                 } else if !args.embedTextLayer {
                     let result = OCRResult(
                         text: resultMessage.text,
@@ -267,14 +320,9 @@ struct MultiprocessCoordinator {
                         path: resultMessage.path,
                         page: resultMessage.page
                     )
-
-                    outputQueue.async {
-                        do {
-                            try writer.write(result: result)
-                        } catch {
-                            dependencies.logger.error("\(error)")
-                        }
-                    }
+                    enqueueOutput(taskID: resultMessage.id, result: result)
+                } else {
+                    markTaskWithoutOutput(resultMessage.id)
                 }
 
                 noteCompletion(path: resultMessage.path)
@@ -283,6 +331,7 @@ struct MultiprocessCoordinator {
                 worker.inflightTasks.removeAll { $0.id == errorMessage.id }
                 errors += 1
                 dependencies.logger.error(errorMessage.message)
+                markTaskWithoutOutput(errorMessage.id)
                 noteCompletion(path: errorMessage.path)
             }
 
@@ -298,14 +347,32 @@ struct MultiprocessCoordinator {
         }
 
         func handleDecodeFailure(from worker: WorkerState) {
+            if worker.inflight > 0 {
+                worker.inflight -= 1
+            }
+            let failedTask: WorkerTask?
+            if worker.inflightTasks.isEmpty {
+                failedTask = nil
+            } else {
+                failedTask = worker.inflightTasks.removeFirst()
+            }
+
             errors += 1
-            dependencies.logger.error("Failed to decode worker output")
-            noteCompletion(path: nil)
+            let taskSuffix = failedTask.map { " for task \($0.id)" } ?? ""
+            dependencies.logger.error("Failed to decode worker output\(taskSuffix)")
+            if let failedTask {
+                markTaskWithoutOutput(failedTask.id)
+            }
+            noteCompletion(path: failedTask?.path)
             if pendingCompletions > 0 {
                 pendingCompletions -= 1
                 completionGroup.leave()
             }
-            fillWorkerQueue(worker)
+            if shouldStopAfterError() {
+                stopSchedulingNewWork()
+            } else {
+                fillWorkerQueue(worker)
+            }
         }
 
         func handleWorkerData(_ data: Data, from worker: WorkerState) {
@@ -319,6 +386,7 @@ struct MultiprocessCoordinator {
                     errors += failedTasks.count
                     for task in failedTasks {
                         dependencies.logger.error("Worker \(worker.id) exited before completing task \(task.id)")
+                        markTaskWithoutOutput(task.id)
                         noteCompletion(path: task.path)
                         if pendingCompletions > 0 {
                             pendingCompletions -= 1
@@ -330,7 +398,12 @@ struct MultiprocessCoordinator {
                     }
                 }
                 if workers.allSatisfy(\.isClosed) {
-                    stopSchedulingNewWork()
+                    if shouldStopScheduling || isCancelling {
+                        stopSchedulingNewWork()
+                    } else {
+                        failUnassignedWork(reason: "All workers exited")
+                        shouldStopScheduling = true
+                    }
                 }
                 return
             }
@@ -380,6 +453,9 @@ struct MultiprocessCoordinator {
 
             workerArgs.append("--dpi")
             workerArgs.append(String(args.dpi))
+
+            workerArgs.append("--prefetch")
+            workerArgs.append(String(args.prefetch))
 
             workerArgs.append("--columns")
             switch args.columns {
@@ -463,9 +539,11 @@ struct MultiprocessCoordinator {
 
         var finalCompletedPages = 0
         var finalErrors = 0
+        var finalSkippedPages = 0
         stateQueue.sync {
             finalCompletedPages = completedPages
             finalErrors = errors
+            finalSkippedPages = skippedPages
         }
 
         // Assemble searchable PDFs from accumulated OCR blocks
@@ -473,20 +551,12 @@ struct MultiprocessCoordinator {
             for (pdfPath, pageResults) in pdfPageResults {
                 do {
                     let sourceURL = URL(fileURLWithPath: pdfPath)
-                    let outputURL: URL
-                    if args.overwrite {
-                        outputURL = sourceURL
-                    } else if let outputDir = args.outputDir {
-                        let fileName = sourceURL.lastPathComponent
-                        try dependencies.fileSystem.createDirectory(
-                            atPath: outputDir,
-                            withIntermediateDirectories: true,
-                            attributes: nil
-                        )
-                        outputURL = URL(fileURLWithPath: outputDir).appendingPathComponent(fileName)
-                    } else {
-                        outputURL = sourceURL
-                    }
+                    let outputURL = try searchablePDFOutputURL(
+                        for: sourceURL,
+                        outputDir: args.outputDir,
+                        overwrite: args.overwrite,
+                        fileSystem: dependencies.fileSystem
+                    )
                     try PDFRenderer.createSearchablePDF(from: sourceURL, pageResults: pageResults, to: outputURL)
                     dependencies.logger.info("Wrote searchable PDF: \(outputURL.path)")
                 } catch {
@@ -505,22 +575,21 @@ struct MultiprocessCoordinator {
             source.cancel()
         }
 
-        // Note: In multiprocess mode, we don't track skipped pages separately
-        // as workers report results/errors without distinguishing existing text extraction
+        let successfulPages = max(0, finalCompletedPages - finalErrors)
+        let completedOCRPages = max(0, successfulPages - finalSkippedPages)
         let processingResult = ProcessingResult(
-            completed: finalCompletedPages - finalErrors,
+            completed: completedOCRPages,
             failed: finalErrors,
-            skipped: 0
+            skipped: finalSkippedPages
         )
         
         if args.progressEnabled {
             let duration = Date().timeIntervalSince(startTime)
-            let successfulPages = max(0, finalCompletedPages - finalErrors)
             let rate = duration > 0 ? Double(successfulPages) / duration : 0
             let summary = ProgressSummary(
-                completed: successfulPages,
+                completed: completedOCRPages,
                 failed: finalErrors,
-                skipped: 0,
+                skipped: finalSkippedPages,
                 duration: duration,
                 throughput: rate
             )

@@ -24,6 +24,7 @@ final class StdoutTextStrategy: OutputStrategy {
         if !noHeaders && !result.text.isEmpty {
             output.write(data: Data([0x0A]))
         }
+        output.flush()
     }
 
     func close() {}
@@ -38,6 +39,7 @@ final class StdoutJSONLStrategy: OutputStrategy {
 
     func write(result: OCRResult) throws {
         writeJSONL(result: result, to: output)
+        output.flush()
     }
 
     func close() {}

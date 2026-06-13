@@ -6,11 +6,17 @@ xcuserdata/
 DerivedData/
 .swiftpm/
 Package.resolved
+.pi-subagent/
+.pytest_cache/
+.venv/
+__pycache__/
+*.pyc
 *.swp
 *~
 output/
 test_input/
 test_inputs/
 test_outputs/
+benchmark/work/
 *.txt
 *.pdf
